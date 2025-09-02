@@ -1,6 +1,5 @@
 "use client";
 
-
 import React, { useEffect, useMemo, useState } from "react";
 
 // DebtFlow, mobile first simplification
@@ -60,7 +59,7 @@ type DebtCard = {
 // ---------- Utilities ----------
 const STORAGE_KEY = "debtflow_state_v3"; // bumped as layout changed
 
-// Stable DEFAULTS for settings, referenced in effects without causing lint warnings
+// Stable defaults for settings
 const DEFAULTS: Settings = {
   debtTotal: 0,
   startingBankroll: 5,
@@ -147,30 +146,37 @@ function remainingDebtFromCards(cards: DebtCard[], payments: Payment[]) {
   return +rem.toFixed(2);
 }
 
+// Augment Window to avoid any-casts in tests
+declare global { interface Window { __DEBTFLOW_TESTED_V3__?: boolean } }
+
 // ---------- App ----------
 export default function App() {
-  
-  const [bets, setBets] = useState<Bet[]>([]);
-  const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [bankedMilestones, setBankedMilestones] = useState<number>(0); // milestones banked from Betting
-  const [cards, setCards] = useState<DebtCard[]>([]);
-
-  // Load and save
-  useEffect(() => {
+  // Load initial state lazily to avoid effect and lint noise
+  const initialFromStorage = () => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed.bets) setBets(parsed.bets);
-        if (parsed.settings) setSettings(parsed.settings ? { ...DEFAULTS, ...parsed.settings } : DEFAULTS);
-        if (parsed.payments) setPayments(parsed.payments);
-        if (typeof parsed.bankedMilestones === "number") setBankedMilestones(parsed.bankedMilestones);
-        if (Array.isArray(parsed.cards)) setCards(parsed.cards);
-      }
-    } catch {}
-  }, [DEFAULTS]);
+      const raw = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+      if (!raw) return { bets: [] as Bet[], settings: DEFAULTS, payments: [] as Payment[], bankedMilestones: 0, cards: [] as DebtCard[] };
+      const parsed = JSON.parse(raw);
+      return {
+        bets: Array.isArray(parsed.bets) ? parsed.bets as Bet[] : [],
+        settings: parsed.settings ? { ...DEFAULTS, ...(parsed.settings as Partial<Settings>) } : DEFAULTS,
+        payments: Array.isArray(parsed.payments) ? parsed.payments as Payment[] : [],
+        bankedMilestones: typeof parsed.bankedMilestones === "number" ? parsed.bankedMilestones as number : 0,
+        cards: Array.isArray(parsed.cards) ? parsed.cards as DebtCard[] : [],
+      };
+    } catch {
+      return { bets: [] as Bet[], settings: DEFAULTS, payments: [] as Payment[], bankedMilestones: 0, cards: [] as DebtCard[] };
+    }
+  };
 
+  const init = initialFromStorage();
+  const [bets, setBets] = useState<Bet[]>(init.bets);
+  const [settings, setSettings] = useState<Settings>(init.settings);
+  const [payments, setPayments] = useState<Payment[]>(init.payments);
+  const [bankedMilestones, setBankedMilestones] = useState<number>(init.bankedMilestones);
+  const [cards, setCards] = useState<DebtCard[]>(init.cards);
+
+  // Save on change
   useEffect(() => {
     const payload = JSON.stringify({ bets, settings, payments, bankedMilestones, cards });
     localStorage.setItem(STORAGE_KEY, payload);
@@ -298,7 +304,7 @@ export default function App() {
   // Quick bank state
   const [qAmount, setQAmount] = useState<string>("");
   const [qSource, setQSource] = useState<PaymentSource>("Savings");
-  const [qCard, setQCard] = useState<string | "none">("none");
+  const [qCard, setQCard] = useState<string>("none");
   const [qNote, setQNote] = useState<string>("");
 
   // ---------- UI ----------
@@ -334,19 +340,19 @@ export default function App() {
           </Card>
         </section>
 
-        {/* Quick bank, central place to allocate to a card, replaces per card widgets */}
+        {/* Quick bank, central place to allocate to a card */}
         <section className="mt-4 sm:mt-6">
           <Card>
             <h2 className="text-base sm:text-lg font-semibold">Quick bank</h2>
             <div className="mt-2 grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3">
               <div className="sm:col-span-3">
-                <LabeledInput label="Amount" prefix="£" type="number" step="0.01" value={qAmount} onChange={setQAmount} />
+                <LabeledInput label="Amount" prefix="£" type="number" step={0.01} value={qAmount} onChange={setQAmount} />
               </div>
               <div className="sm:col-span-3">
                 <LabeledSelect label="Source" value={qSource} onChange={(v) => setQSource(v as PaymentSource)} options={["Savings", "Trading", "Betting"]} />
               </div>
               <div className="sm:col-span-4">
-                <LabeledSelect label="Target card" value={qCard} onChange={(v) => setQCard(v as any)} options={[{ label: "none", value: "none" }, ...cards.map(c => ({ label: c.name || "Card", value: c.id }))]} />
+                <LabeledSelect label="Target card" value={qCard} onChange={(v) => setQCard(v)} options={[{ label: "none", value: "none" }, ...cards.map(c => ({ label: c.name || "Card", value: c.id }))]} />
                 <div className="text-[11px] text-neutral-500 mt-1 sm:hidden">
                   {qCard === "none" ? "Unassigned" : `To ${cards.find(c => c.id === qCard)?.name ?? "Card"}`}
                 </div>
@@ -391,7 +397,7 @@ export default function App() {
                         <LabeledInput label="Name" value={c.name} onChange={(v) => setCards(cs => cs.map(x => x.id === c.id ? { ...x, name: v } : x))} />
                       </div>
                       <div className="sm:col-span-3">
-                        <LabeledInput label="Balance" prefix="£" type="number" step="0.01" value={c.balance} onChange={(v) => setCards(cs => cs.map(x => x.id === c.id ? { ...x, balance: cleanNumber(v) } : x))} />
+                        <LabeledInput label="Balance" prefix="£" type="number" step={0.01} value={c.balance} onChange={(v) => setCards(cs => cs.map(x => x.id === c.id ? { ...x, balance: cleanNumber(v) } : x))} />
                       </div>
                       <div className="sm:col-span-4 grid grid-cols-2 gap-3 text-sm">
                         <Stat label="Paid" value={formatGBP(paidToCard)} />
@@ -435,11 +441,11 @@ export default function App() {
             <details className="mt-3">
               <summary className="cursor-pointer text-sm text-neutral-300">Settings</summary>
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-5 gap-3">
-                <LabeledInput label="Target profit" prefix="£" type="number" step="0.01" value={settings.targetAmount} onChange={(v) => setSettings(s => ({ ...s, targetAmount: cleanNumber(v) }))} />
-                <LabeledInput label="Bank percent" type="number" step="1" value={settings.bankPercentOnTarget} onChange={(v) => setSettings(s => ({ ...s, bankPercentOnTarget: Math.max(0, Math.min(100, Math.round(cleanNumber(v)))) }))} />
-                <LabeledInput label="Starting bankroll" prefix="£" type="number" step="0.01" value={settings.startingBankroll} onChange={(v) => setSettings(s => ({ ...s, startingBankroll: cleanNumber(v) }))} />
-                <LabeledInput label="Run start" prefix="£" type="number" step="0.01" value={settings.runStartStake} onChange={(v) => setSettings(s => ({ ...s, runStartStake: cleanNumber(v) }))} />
-                <LabeledInput label="Run target" prefix="£" type="number" step="0.01" value={settings.runTargetStake} onChange={(v) => setSettings(s => ({ ...s, runTargetStake: cleanNumber(v) }))} />
+                <LabeledInput label="Target profit" prefix="£" type="number" step={0.01} value={settings.targetAmount} onChange={(v) => setSettings(s => ({ ...s, targetAmount: cleanNumber(v) }))} />
+                <LabeledInput label="Bank percent" type="number" step={1} value={settings.bankPercentOnTarget} onChange={(v) => setSettings(s => ({ ...s, bankPercentOnTarget: Math.max(0, Math.min(100, Math.round(cleanNumber(v)))) }))} />
+                <LabeledInput label="Starting bankroll" prefix="£" type="number" step={0.01} value={settings.startingBankroll} onChange={(v) => setSettings(s => ({ ...s, startingBankroll: cleanNumber(v) }))} />
+                <LabeledInput label="Run start" prefix="£" type="number" step={0.01} value={settings.runStartStake} onChange={(v) => setSettings(s => ({ ...s, runStartStake: cleanNumber(v) }))} />
+                <LabeledInput label="Run target" prefix="£" type="number" step={0.01} value={settings.runTargetStake} onChange={(v) => setSettings(s => ({ ...s, runTargetStake: cleanNumber(v) }))} />
               </div>
             </details>
           </Card>
@@ -530,7 +536,7 @@ export default function App() {
                               <div className="inline-flex items-center gap-1">
                                 {ret == null ? <span className="text-neutral-400">Pending</span> : <span>{formatGBP(ret)}</span>}
                                 <IconButton title="Edit return" onClick={() => openReturnEditor(b)}>
-                                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.03 0-1.42L18.34 3.25a1 1 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.87-1.79z"/></svg>
+                                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.03  0-1.42L18.34 3.25a1 1 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.87-1.79z"/></svg>
                                 </IconButton>
                               </div>
                             ) : (
@@ -580,10 +586,10 @@ export default function App() {
                 <LabeledInput className="sm:col-span-2" label="Date" type="date" value={form.date || todayYYYYMMDD()} onChange={(v) => setForm(f => ({ ...f, date: v }))} />
                 <LabeledInput className="sm:col-span-4 col-span-2" label="Description" placeholder="Villa v Palace, over 9 corners" value={form.description || ""} onChange={(v) => setForm(f => ({ ...f, description: v }))} />
                 <LabeledSelect className="sm:col-span-2 col-span-1" label="Sport" value={form.sport as string} onChange={(v) => setForm(f => ({ ...f, sport: v as Sport }))} options={["Football", "Cricket", "Tennis", "Other"]} />
-                <LabeledInput className="sm:col-span-1 col-span-1" label="Stake" prefix="£" type="number" step="0.01" value={form.stake ?? 0} onChange={(v) => setForm(f => ({ ...f, stake: cleanNumber(v) }))} />
-                <LabeledInput className="sm:col-span-1 col-span-1" label="Odds" type="number" step="0.01" value={form.oddsDecimal ?? 1} onChange={(v) => setForm(f => ({ ...f, oddsDecimal: cleanNumber(v) }))} />
+                <LabeledInput className="sm:col-span-1 col-span-1" label="Stake" prefix="£" type="number" step={0.01} value={form.stake ?? 0} onChange={(v) => setForm(f => ({ ...f, stake: cleanNumber(v) }))} />
+                <LabeledInput className="sm:col-span-1 col-span-1" label="Odds" type="number" step={0.01} value={form.oddsDecimal ?? 1} onChange={(v) => setForm(f => ({ ...f, oddsDecimal: cleanNumber(v) }))} />
                 <LabeledSelect className="sm:col-span-2 col-span-1" label="Status" value={form.status as string} onChange={(v) => setForm(f => ({ ...f, status: v as BetStatus }))} options={["Pending", "Won", "Lost"]} />
-                <LabeledInput className="sm:col-span-2 col-span-1" label="Return override" prefix="£" type="number" step="0.01" value={form.returnOverride ?? ""} onChange={(v) => setForm(f => ({ ...f, returnOverride: v === "" ? null : cleanNumber(v) }))} />
+                <LabeledInput className="sm:col-span-2 col-span-1" label="Return override" prefix="£" type="number" step={0.01} value={form.returnOverride ?? ""} onChange={(v) => setForm(f => ({ ...f, returnOverride: v === "" ? null : cleanNumber(v) }))} />
                 <div className="sm:col-span-12 col-span-2 flex justify-end">
                   <Button onClick={addBet}>Add bet</Button>
                 </div>
@@ -631,7 +637,18 @@ function IconButton({ children, onClick, title }: { children: React.ReactNode, o
   );
 }
 
-function LabeledInput({ label, value, onChange, type = "text", prefix, step, className, placeholder }: { label: string, value: any, onChange: (v: string) => void, type?: string, prefix?: string, step?: string, className?: string, placeholder?: string }) {
+type LabeledInputProps = {
+  label: string;
+  value: string | number;
+  onChange: (v: string) => void;
+  type?: string;
+  prefix?: string;
+  step?: number | string;
+  className?: string;
+  placeholder?: string;
+};
+
+function LabeledInput({ label, value, onChange, type = "text", prefix, step, className, placeholder }: LabeledInputProps) {
   return (
     <div className={className}>
       {label ? <label className="text-[10px] sm:text-xs text-neutral-400">{label}</label> : null}
@@ -642,7 +659,7 @@ function LabeledInput({ label, value, onChange, type = "text", prefix, step, cla
           type={type}
           step={step}
           placeholder={placeholder}
-          value={value as any}
+          value={value}
           onChange={(e) => onChange(e.target.value)}
         />
       </div>
@@ -650,15 +667,17 @@ function LabeledInput({ label, value, onChange, type = "text", prefix, step, cla
   );
 }
 
-function LabeledSelect({ label, value, onChange, options, className }: { label?: string, value: string, onChange: (v: string) => void, options: Array<string | { label: string, value: string }>, className?: string }) {
+type OptionLV = { label: string; value: string };
+
+function LabeledSelect({ label, value, onChange, options, className }: { label?: string, value: string, onChange: (v: string) => void, options: Array<string | OptionLV>, className?: string }) {
   // Supports either ["A", "B"] or [{ label: "A", value: "a" }]
-  const normalized = (options as any[]).map((o: any) => typeof o === "string" ? { label: o, value: o } : o);
+  const normalized: OptionLV[] = options.map((o) => typeof o === "string" ? { label: o, value: o } : o);
   return (
     <div className={className}>
       {label ? <label className="text-[10px] sm:text-xs text-neutral-400">{label}</label> : null}
       <div className="mt-1 rounded-xl border border-[#222] bg-black px-3 py-2 focus-within:border-neutral-600">
         <select className="w-full bg-transparent outline-none text-neutral-100" value={value} onChange={(e) => onChange(e.target.value)}>
-          {normalized.map((o: {label: string, value: string}) => (
+          {normalized.map((o) => (
             <option key={o.value} value={o.value} className="bg-[#141414]">{o.label}</option>
           ))}
         </select>
@@ -719,7 +738,7 @@ function AddCardForm({ onAdd }: { onAdd: (name: string, balance: number) => void
         <LabeledInput label="New card name" value={name} onChange={setName} placeholder="eg, Barclaycard" />
       </div>
       <div className="sm:col-span-3">
-        <LabeledInput label="Balance" prefix="£" type="number" step="0.01" value={bal} onChange={setBal} placeholder="eg, 1200" />
+        <LabeledInput label="Balance" prefix="£" type="number" step={0.01} value={bal} onChange={setBal} placeholder="eg, 1200" />
       </div>
       <div className="sm:col-span-2 flex items-end">
         <Button onClick={() => { const b = cleanNumber(bal); if (!name || b <= 0) return; onAdd(name.trim(), +b.toFixed(2)); setName(""); setBal(""); }}>Add card</Button>
@@ -803,7 +822,7 @@ function runSelfTests() {
   }
 }
 
-if (typeof window !== "undefined" && !(window as any).__DEBTFLOW_TESTED_V3__) {
-  (window as any).__DEBTFLOW_TESTED_V3__ = true;
+if (typeof window !== "undefined" && !window.__DEBTFLOW_TESTED_V3__) {
+  window.__DEBTFLOW_TESTED_V3__ = true;
   runSelfTests();
 }
