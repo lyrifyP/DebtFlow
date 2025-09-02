@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react/no-unescaped-entities */
 
 import React, { useEffect, useMemo, useState } from "react";
 
@@ -354,7 +355,7 @@ export default function App() {
         <header className="pt-6 sm:pt-10 pb-4 sm:pb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight">DebtFlow</h1>
-            <p className="text-neutral-400 mt-1 text-sm sm:text-base">Track your debt and how you're paying it off</p>
+            <p className="text-neutral-400 mt-1 text-sm sm:text-base">One place to clear debt, Betting, Trading, Savings</p>
           </div>
           <Badge>{new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</Badge>
         </header>
@@ -868,7 +869,7 @@ function runSelfTests() {
     // Template fallback sanity check
     const name: string | undefined = undefined;
     const label = `To ${name ?? "Card"}`;
-    console.assert(label.endsWith("Card"), "Template fallback should render 'Card'");
+    console.assert(label.endsWith("Card"), "Template fallback should render Card");
   } catch (e) {
     console.error("Self tests failed", e);
   }
