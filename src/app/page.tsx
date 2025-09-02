@@ -56,8 +56,18 @@ type DebtCard = {
   balance: number; // starting balance snapshot
 };
 
+type UIState = {
+  overview: boolean;
+  quickBank: boolean;
+  cards: boolean;
+  betting: boolean;
+  recent: boolean;
+  betLog: boolean;
+};
+
 // ---------- Utilities ----------
-const STORAGE_KEY = "debtflow_state_v3"; // bumped as layout changed
+const STORAGE_KEY = "debtflow_state_v3";
+const UI_KEY = "debtflow_ui_v1";
 
 // Stable defaults for settings
 const DEFAULTS: Settings = {
@@ -69,6 +79,15 @@ const DEFAULTS: Settings = {
   autoBankCardId: null,
   runStartStake: 5,
   runTargetStake: 100,
+};
+
+const DEFAULT_UI: UIState = {
+  overview: true,
+  quickBank: false,
+  cards: false,
+  betting: false,
+  recent: false,
+  betLog: false,
 };
 
 function formatGBP(n: number | null | undefined) {
@@ -169,12 +188,33 @@ export default function App() {
     }
   };
 
+  const initialUI = (): UIState => {
+    try {
+      const raw = typeof window !== "undefined" ? localStorage.getItem(UI_KEY) : null;
+      if (!raw) return DEFAULT_UI;
+      const parsed = JSON.parse(raw) as Partial<UIState>;
+      return { ...DEFAULT_UI, ...parsed };
+    } catch {
+      return DEFAULT_UI;
+    }
+  };
+
   const init = initialFromStorage();
   const [bets, setBets] = useState<Bet[]>(init.bets);
   const [settings, setSettings] = useState<Settings>(init.settings);
   const [payments, setPayments] = useState<Payment[]>(init.payments);
   const [bankedMilestones, setBankedMilestones] = useState<number>(init.bankedMilestones);
   const [cards, setCards] = useState<DebtCard[]>(init.cards);
+
+  // UI open state, persisted
+  const [ui, setUI] = useState<UIState>(initialUI);
+  function toggleSection<K extends keyof UIState>(key: K) {
+    setUI(prev => {
+      const next = { ...prev, [key]: !prev[key] } as UIState;
+      localStorage.setItem(UI_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
 
   // Save on change
   useEffect(() => {
@@ -314,16 +354,16 @@ export default function App() {
         <header className="pt-6 sm:pt-10 pb-4 sm:pb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight">DebtFlow</h1>
-            <p className="text-neutral-400 mt-1 text-sm sm:text-base">One place to clear debt, Betting, Trading, Savings</p>
+            <p className="text-neutral-400 mt-1 text-sm sm:text-base">Track your debt and how you're paying it off</p>
           </div>
           <Badge>{new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</Badge>
         </header>
 
         {/* Overview */}
         <section className="grid grid-cols-1 gap-4 sm:gap-6">
-          <Card>
-            <h2 className="text-lg sm:text-xl font-semibold">Overview</h2>
-            <div className="mt-3">
+          <Section title="Overview" isOpen={ui.overview} onToggle={() => toggleSection("overview")}
+            summary={<span className="text-xs text-neutral-400">{debtProgress}% to zero</span>}>
+            <div className="mt-1">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs sm:text-sm text-neutral-400">Progress to zero</span>
                 <span className="text-xs sm:text-sm font-medium">{debtProgress}%</span>
@@ -337,14 +377,13 @@ export default function App() {
                 <Stat label="Remaining" value={formatGBP(remainingTotal)} />
               </div>
             </div>
-          </Card>
+          </Section>
         </section>
 
-        {/* Quick bank, central place to allocate to a card */}
+        {/* Quick bank */}
         <section className="mt-4 sm:mt-6">
-          <Card>
-            <h2 className="text-base sm:text-lg font-semibold">Quick bank</h2>
-            <div className="mt-2 grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3">
+          <Section title="Quick bank" isOpen={ui.quickBank} onToggle={() => toggleSection("quickBank")} summary={<span className="text-xs text-neutral-400">Avail {formatGBP(availableProfitBetting)}</span>}>
+            <div className="mt-1 grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3">
               <div className="sm:col-span-3">
                 <LabeledInput label="Amount" prefix="£" type="number" step={0.01} value={qAmount} onChange={setQAmount} />
               </div>
@@ -376,17 +415,13 @@ export default function App() {
             {qSource === "Betting" ? (
               <div className="text-[11px] text-neutral-500 mt-2">Available from betting, {formatGBP(availableProfitBetting)}</div>
             ) : null}
-          </Card>
+          </Section>
         </section>
 
-        {/* Cards, simplified list */}
+        {/* Cards */}
         <section className="mt-4 sm:mt-6">
-          <Card>
-            <div className="flex items-center justify-between">
-              <h2 className="text-base sm:text-lg font-semibold">Cards</h2>
-              <span className="text-xs sm:text-sm text-neutral-400">{cards.length} listed</span>
-            </div>
-            <div className="mt-3 space-y-2">
+          <Section title="Cards" isOpen={ui.cards} onToggle={() => toggleSection("cards")} summary={<span className="text-xs text-neutral-400">{cards.length} listed, Rem {formatGBP(remainingTotal)}</span>}>
+            <div className="mt-2 space-y-2">
               {cards.map((c) => {
                 const paidToCard = sumPaymentsToCard(payments, c.id);
                 const remaining = Math.max(0, +(c.balance - paidToCard).toFixed(2));
@@ -416,14 +451,13 @@ export default function App() {
 
             {/* Add card */}
             <AddCardForm onAdd={(name, bal) => setCards(cs => [{ id: uuid(), name, balance: bal }, ...cs ])} />
-          </Card>
+          </Section>
         </section>
 
-        {/* Betting, compact controls */}
+        {/* Betting */}
         <section className="mt-4 sm:mt-6 grid grid-cols-1 gap-4">
-          <Card>
-            <h3 className="text-base sm:text-lg font-semibold">Betting</h3>
-            <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
+          <Section title="Betting" isOpen={ui.betting} onToggle={() => toggleSection("betting")} summary={<span className="text-xs text-neutral-400">Profit {formatGBP(stats.profit)}, Auto {settings.autoBankEnabled ? "on" : "off"}</span>}>
+            <div className="mt-1 grid grid-cols-2 gap-3 text-sm">
               <Stat label="Profit" value={formatGBP(stats.profit)} />
               <Stat label="Available" value={formatGBP(availableProfitBetting)} />
             </div>
@@ -448,15 +482,14 @@ export default function App() {
                 <LabeledInput label="Run target" prefix="£" type="number" step={0.01} value={settings.runTargetStake} onChange={(v) => setSettings(s => ({ ...s, runTargetStake: cleanNumber(v) }))} />
               </div>
             </details>
-          </Card>
+          </Section>
         </section>
 
-        {/* Recent contributions, compact */}
+        {/* Recent */}
         <section className="mt-4 sm:mt-6">
-          <Card>
-            <h2 className="text-base sm:text-lg font-semibold">Recent</h2>
+          <Section title="Recent" isOpen={ui.recent} onToggle={() => toggleSection("recent")} summary={<span className="text-xs text-neutral-400">{payments.length} items</span>}>
             {payments.length === 0 ? (
-              <div className="mt-3 text-sm text-neutral-400">No contributions yet</div>
+              <div className="mt-1 text-sm text-neutral-400">No contributions yet</div>
             ) : (
               <ul className="mt-2 space-y-2 text-sm">
                 {payments.slice(0, 6).map(p => (
@@ -477,19 +510,14 @@ export default function App() {
                 ))}
               </ul>
             )}
-          </Card>
+          </Section>
         </section>
 
-        {/* Betting details for power users, kept but already responsive */}
+        {/* Bet log */}
         <section className="mt-6 sm:mt-8">
-          <Card>
-            <div className="flex items-center justify-between">
-              <h2 className="text-base sm:text-lg font-semibold">Bet log</h2>
-              <span className="text-xs sm:text-sm text-neutral-400">{bets.length} total</span>
-            </div>
-
+          <Section title="Bet log" isOpen={ui.betLog} onToggle={() => toggleSection("betLog")} summary={<span className="text-xs text-neutral-400">{bets.length} bets, {runProgress}% of {formatGBP(runTarget)}</span>}>
             {/* Roller progress bar, £5 to £100 challenge */}
-            <div className="mt-3">
+            <div className="mt-1">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs sm:text-sm text-neutral-400">{formatGBP(currentBankroll)} of {formatGBP(runTarget)}</span>
                 <span className="text-xs sm:text-sm font-medium">{runProgress}%</span>
@@ -595,7 +623,7 @@ export default function App() {
                 </div>
               </div>
             </div>
-          </Card>
+          </Section>
         </section>
 
         <footer className="mt-10 text-center text-xs text-neutral-500">
@@ -612,6 +640,26 @@ function Card({ children }: { children: React.ReactNode }) {
     <div className="bg-[#141414] border border-[#222] rounded-2xl p-4 sm:p-5 shadow-lg shadow-black/40">
       {children}
     </div>
+  );
+}
+
+function Section({ title, isOpen, onToggle, summary, children }: { title: string; isOpen: boolean; onToggle: () => void; summary?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <h2 className="text-base sm:text-lg font-semibold">{title}</h2>
+        <div className="flex items-center gap-3">
+          {summary ? <div className="text-right hidden sm:block">{summary}</div> : null}
+          <button aria-label={isOpen ? `Collapse ${title}` : `Expand ${title}`} aria-expanded={isOpen} onClick={onToggle} className="p-2 rounded-lg bg-[#141414] border border-[#222] hover:bg-[#1f1f1f]">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" className={`transition-transform ${isOpen ? "rotate-180" : "rotate-0"}`}>
+              <path d="M7 10l5 5 5-5z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      {summary ? <div className="sm:hidden mt-1 text-xs text-neutral-400">{summary}</div> : null}
+      {isOpen ? <div>{children}</div> : null}
+    </Card>
   );
 }
 
@@ -812,6 +860,10 @@ function runSelfTests() {
     const currentEnd = startingBankroll + profitEnd;
     const pctEnd = Math.min(100, Math.max(0, Math.round(((currentEnd - runStart) / (runTarget - runStart)) * 100)));
     console.assert(pctEnd === 100, "Run progress should be 100 percent at target");
+
+    // UI defaults
+    const uiDefaults: UIState = { overview: true, quickBank: false, cards: false, betting: false, recent: false, betLog: false };
+    console.assert(uiDefaults.overview && !uiDefaults.quickBank && !uiDefaults.cards && !uiDefaults.betting && !uiDefaults.recent && !uiDefaults.betLog, "UI defaults should open only Overview");
 
     // Template fallback sanity check
     const name: string | undefined = undefined;
