@@ -1,5 +1,3 @@
-"use client";
-
 import React, { useEffect, useMemo, useState } from "react";
 
 // DebtFlow, mobile first simplification
@@ -58,6 +56,18 @@ type DebtCard = {
 
 // ---------- Utilities ----------
 const STORAGE_KEY = "debtflow_state_v3"; // bumped as layout changed
+
+// Stable DEFAULTS for settings, referenced in effects without causing lint warnings
+const DEFAULTS: Settings = {
+  debtTotal: 0,
+  startingBankroll: 5,
+  targetAmount: 100,
+  bankPercentOnTarget: 50,
+  autoBankEnabled: true,
+  autoBankCardId: null,
+  runStartStake: 5,
+  runTargetStake: 100,
+};
 
 function formatGBP(n: number | null | undefined) {
   if (n == null || Number.isNaN(n)) return "N/A";
@@ -136,19 +146,9 @@ function remainingDebtFromCards(cards: DebtCard[], payments: Payment[]) {
 
 // ---------- App ----------
 export default function App() {
-  const defaults: Settings = {
-    debtTotal: 0,
-    startingBankroll: 5,
-    targetAmount: 100,
-    bankPercentOnTarget: 50,
-    autoBankEnabled: true,
-    autoBankCardId: null,
-    runStartStake: 5,
-    runTargetStake: 100,
-  };
-
+  
   const [bets, setBets] = useState<Bet[]>([]);
-  const [settings, setSettings] = useState<Settings>(defaults);
+  const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [bankedMilestones, setBankedMilestones] = useState<number>(0); // milestones banked from Betting
   const [cards, setCards] = useState<DebtCard[]>([]);
@@ -160,13 +160,13 @@ export default function App() {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed.bets) setBets(parsed.bets);
-        if (parsed.settings) setSettings({ ...defaults, ...parsed.settings });
+        if (parsed.settings) setSettings(parsed.settings ? { ...DEFAULTS, ...parsed.settings } : DEFAULTS);
         if (parsed.payments) setPayments(parsed.payments);
         if (typeof parsed.bankedMilestones === "number") setBankedMilestones(parsed.bankedMilestones);
         if (Array.isArray(parsed.cards)) setCards(parsed.cards);
       }
     } catch {}
-  }, []);
+  }, [DEFAULTS]);
 
   useEffect(() => {
     const payload = JSON.stringify({ bets, settings, payments, bankedMilestones, cards });
@@ -305,7 +305,7 @@ export default function App() {
         <header className="pt-6 sm:pt-10 pb-4 sm:pb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight">DebtFlow</h1>
-            <p className="text-neutral-400 mt-1 text-sm sm:text-base">Track your debt and how you're paying it off</p>
+            <p className="text-neutral-400 mt-1 text-sm sm:text-base">One place to clear debt, Betting, Trading, Savings</p>
           </div>
           <Badge>{new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</Badge>
         </header>
