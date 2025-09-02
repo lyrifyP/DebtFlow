@@ -1,3 +1,6 @@
+"use client";
+
+
 import React, { useEffect, useMemo, useState } from "react";
 
 // DebtFlow, mobile first simplification
