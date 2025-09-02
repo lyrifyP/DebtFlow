@@ -513,7 +513,7 @@ export default function App() {
                       <Th className="text-right hidden sm:table-cell">Odds</Th>
                       <Th>Status</Th>
                       <Th className="text-right">Return</Th>
-                      <Th></Th>
+                      <Th><span className="sr-only">Actions</span></Th>
                     </tr>
                   </thead>
                   <tbody>
