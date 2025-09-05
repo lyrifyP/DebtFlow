@@ -22,6 +22,7 @@ type Bet = {
   settledAt?: string | null; // ISO timestamp when status becomes Won or Lost
   createdAt: string; // ISO
   updatedAt: string; // ISO
+  archived?: boolean; // hidden from main tabs when true
 };
 
 type Settings = {
@@ -64,6 +65,10 @@ type UIState = {
   betting: boolean;
   recent: boolean;
   betLog: boolean;
+  // Bet log extras
+  betTab: "Pending" | "Settled" | "Archived";
+  betVisibleCount: number; // number of items shown in Bet log
+  betGroupOpen: Record<string, boolean>; // dateKey => open or closed
 };
 
 // ---------- Utilities ----------
@@ -89,6 +94,9 @@ const DEFAULT_UI: UIState = {
   betting: false,
   recent: false,
   betLog: false,
+  betTab: "Pending",
+  betVisibleCount: 20,
+  betGroupOpen: {},
 };
 
 function formatGBP(n: number | null | undefined) {
@@ -166,6 +174,59 @@ function remainingDebtFromCards(cards: DebtCard[], payments: Payment[]) {
   return +rem.toFixed(2);
 }
 
+function compareByDateDesc(a: Bet, b: Bet) {
+  if (a.date === b.date) return (b.createdAt || "").localeCompare(a.createdAt || "");
+  return b.date.localeCompare(a.date);
+}
+
+function groupByDate(bets: Bet[]) {
+  const map = new Map<string, Bet[]>();
+  for (const b of bets) {
+    const k = b.date;
+    const arr = map.get(k) || [];
+    arr.push(b);
+    map.set(k, arr);
+  }
+  const keys = Array.from(map.keys()).sort((a, b) => b.localeCompare(a));
+  return keys.map(key => ({ key, items: map.get(key)!.sort(compareByDateDesc) }));
+}
+
+function groupRollup(items: Bet[]) {
+  const settled = items.filter(b => b.status !== "Pending");
+  const won = settled.filter(b => b.status === "Won");
+  const staked = settled.reduce((s, b) => s + b.stake, 0);
+  const returns = settled.reduce((s, b) => s + (effectiveReturn(b) ?? 0), 0);
+  const profit = +(returns - staked).toFixed(2);
+  const hit = settled.length ? Math.round((won.length / settled.length) * 100) : 0;
+  return { staked, returns, profit, hit };
+}
+
+function computeRunsFromSettled(bets: Bet[], targetAmount: number) {
+  // Runs based on hitting each multiple of target profit across time
+  const settled = [...bets].filter(b => b.status !== "Pending").sort(compareByDateDesc).reverse(); // chronological
+  const runs: { index: number; from: string; to: string; bets: number; profit: number; hit: number }[] = [];
+  let runStartIdx = 0;
+  let cum = 0;
+  let lastMilestoneCum = 0;
+  let wins = 0;
+  for (let i = 0; i < settled.length; i++) {
+    const b = settled[i];
+    const ret = effectiveReturn(b) ?? 0;
+    const p = +(ret - b.stake).toFixed(2);
+    cum += p;
+    if (b.status === "Won") wins++;
+    if (cum - lastMilestoneCum >= targetAmount && targetAmount > 0) {
+      const slice = settled.slice(runStartIdx, i + 1);
+      const hit = slice.length ? Math.round((slice.filter(x => x.status === "Won").length / slice.length) * 100) : 0;
+      runs.push({ index: runs.length + 1, from: slice[0].date, to: slice[slice.length - 1].date, bets: slice.length, profit: +(slice.reduce((s, x) => s + ((effectiveReturn(x) ?? 0) - x.stake), 0)).toFixed(2), hit });
+      runStartIdx = i + 1;
+      lastMilestoneCum = cum;
+      wins = 0;
+    }
+  }
+  return runs;
+}
+
 // Augment Window to avoid any-casts in tests
 declare global { interface Window { __DEBTFLOW_TESTED_V3__?: boolean } }
 
@@ -177,8 +238,11 @@ export default function App() {
       const raw = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
       if (!raw) return { bets: [] as Bet[], settings: DEFAULTS, payments: [] as Payment[], bankedMilestones: 0, cards: [] as DebtCard[] };
       const parsed = JSON.parse(raw);
+      const loadedBets: Bet[] = Array.isArray(parsed.bets) ? parsed.bets : [];
+      // Ensure archived defaults to false when absent
+      for (const b of loadedBets) if (b.archived == null) b.archived = false;
       return {
-        bets: Array.isArray(parsed.bets) ? parsed.bets as Bet[] : [],
+        bets: loadedBets,
         settings: parsed.settings ? { ...DEFAULTS, ...(parsed.settings as Partial<Settings>) } : DEFAULTS,
         payments: Array.isArray(parsed.payments) ? parsed.payments as Payment[] : [],
         bankedMilestones: typeof parsed.bankedMilestones === "number" ? parsed.bankedMilestones as number : 0,
@@ -194,7 +258,7 @@ export default function App() {
       const raw = typeof window !== "undefined" ? localStorage.getItem(UI_KEY) : null;
       if (!raw) return DEFAULT_UI;
       const parsed = JSON.parse(raw) as Partial<UIState>;
-      return { ...DEFAULT_UI, ...parsed };
+      return { ...DEFAULT_UI, ...parsed, betGroupOpen: parsed.betGroupOpen || {} };
     } catch {
       return DEFAULT_UI;
     }
@@ -209,12 +273,17 @@ export default function App() {
 
   // UI open state, persisted
   const [ui, setUI] = useState<UIState>(initialUI);
+  function persistUI(next: UIState) {
+    localStorage.setItem(UI_KEY, JSON.stringify(next));
+  }
   function toggleSection<K extends keyof UIState>(key: K) {
-    setUI(prev => {
-      const next = { ...prev, [key]: !prev[key] } as UIState;
-      localStorage.setItem(UI_KEY, JSON.stringify(next));
-      return next;
-    });
+    if (typeof ui[key] === "boolean") {
+      setUI(prev => {
+        const next = { ...prev, [key]: !(prev[key] as unknown as boolean) } as UIState;
+        persistUI(next);
+        return next;
+      });
+    }
   }
 
   // Save on change
@@ -281,6 +350,7 @@ export default function App() {
       settledAt: form.status !== "Pending" ? now : null,
       createdAt: now,
       updatedAt: now,
+      archived: false,
     };
     setBets(prev => [bet, ...prev]);
     setForm({ date: todayYYYYMMDD(), description: "", sport: "Football", stake: 5, oddsDecimal: 2, status: "Pending", returnOverride: null });
@@ -292,6 +362,14 @@ export default function App() {
 
   function removeBet(id: string) {
     setBets(prev => prev.filter(b => b.id !== id));
+  }
+
+  function setArchived(id: string, flag: boolean) {
+    setBets(prev => prev.map(b => (b.id === id ? { ...b, archived: flag } : b)));
+  }
+
+  function archiveGroup(dateKey: string, flag: boolean) {
+    setBets(prev => prev.map(b => (b.date === dateKey && b.status !== "Pending" ? { ...b, archived: flag } : b)));
   }
 
   // Inline return editor state
@@ -347,6 +425,52 @@ export default function App() {
   const [qSource, setQSource] = useState<PaymentSource>("Savings");
   const [qCard, setQCard] = useState<string>("none");
   const [qNote, setQNote] = useState<string>("");
+
+  // Bet log derived
+  const counts = useMemo(() => {
+    const nonArchived = bets.filter(b => !b.archived);
+    const pending = nonArchived.filter(b => b.status === "Pending").length;
+    const settled = nonArchived.filter(b => b.status !== "Pending").length;
+    const archived = bets.filter(b => b.archived).length;
+    return { pending, settled, archived };
+  }, [bets]);
+
+  const filteredSorted = useMemo(() => {
+    let src: Bet[];
+    if (ui.betTab === "Pending") src = bets.filter(b => !b.archived && b.status === "Pending");
+    else if (ui.betTab === "Settled") src = bets.filter(b => !b.archived && b.status !== "Pending");
+    else src = bets.filter(b => b.archived);
+    return [...src].sort(compareByDateDesc);
+  }, [bets, ui.betTab]);
+
+  const [visibleCount, setVisibleCount] = useState<number>(ui.betVisibleCount);
+  useEffect(() => {
+    // reset when tab changes
+    setVisibleCount(20);
+  }, [ui.betTab]);
+
+  useEffect(() => {
+    // persist visibleCount to UI state
+    setUI(prev => {
+      const next = { ...prev, betVisibleCount: visibleCount };
+      persistUI(next);
+      return next;
+    });
+  }, [visibleCount]);
+
+  const visibleItems = useMemo(() => filteredSorted.slice(0, visibleCount), [filteredSorted, visibleCount]);
+  const groupedVisible = useMemo(() => groupByDate(visibleItems), [visibleItems]);
+
+  const runs = useMemo(() => computeRunsFromSettled(bets.filter(b => !b.archived), settings.targetAmount), [bets, settings.targetAmount]);
+
+  function toggleDay(key: string) {
+    setUI(prev => {
+      const open = prev.betGroupOpen[key];
+      const next: UIState = { ...prev, betGroupOpen: { ...prev.betGroupOpen, [key]: !open } };
+      persistUI(next);
+      return next;
+    });
+  }
 
   // ---------- UI ----------
   return (
@@ -517,8 +641,35 @@ export default function App() {
         {/* Bet log */}
         <section className="mt-6 sm:mt-8">
           <Section title="Bet log" isOpen={ui.betLog} onToggle={() => toggleSection("betLog")} summary={<span className="text-xs text-neutral-400">{bets.length} bets, {runProgress}% of {formatGBP(runTarget)}</span>}>
+            {/* Tabs */}
+            <div className="mt-1 flex items-center gap-2 text-sm">
+              <TabButton active={ui.betTab === "Pending"} onClick={() => { const next = { ...ui, betTab: "Pending" as const }; setUI(next); persistUI(next); }}>Pending ({counts.pending})</TabButton>
+              <TabButton active={ui.betTab === "Settled"} onClick={() => { const next = { ...ui, betTab: "Settled" as const }; setUI(next); persistUI(next); }}>Settled ({counts.settled})</TabButton>
+              <TabButton active={ui.betTab === "Archived"} onClick={() => { const next = { ...ui, betTab: "Archived" as const }; setUI(next); persistUI(next); }}>Archived ({counts.archived})</TabButton>
+            </div>
+
+            {/* Runs summary */}
+            <details className="mt-3">
+              <summary className="cursor-pointer text-sm text-neutral-300">Runs, {runs.length}</summary>
+              {runs.length === 0 ? (
+                <div className="text-sm text-neutral-500 mt-2">No completed runs yet</div>
+              ) : (
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {runs.map(r => (
+                    <div key={r.index} className="rounded-xl bg-[#141414] border border-[#222] p-3 text-sm">
+                      <div className="flex items-center justify-between">
+                        <div className="font-semibold">Run {r.index}</div>
+                        <div className={`text-xs ${r.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatGBP(r.profit)}</div>
+                      </div>
+                      <div className="text-xs text-neutral-400 mt-1">{r.from} to {r.to}, {r.bets} bets, {r.hit}% hit</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </details>
+
             {/* Roller progress bar, £5 to £100 challenge */}
-            <div className="mt-1">
+            <div className="mt-3">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs sm:text-sm text-neutral-400">{formatGBP(currentBankroll)} of {formatGBP(runTarget)}</span>
                 <span className="text-xs sm:text-sm font-medium">{runProgress}%</span>
@@ -528,102 +679,198 @@ export default function App() {
               </div>
             </div>
 
-            {bets.length === 0 ? (
-              <EmptyState />
-            ) : (
-              <div className="mt-3 sm:mt-4 overflow-x-auto">
-                <table className="min-w-full text-xs sm:text-sm">
-                  <thead>
-                    <tr className="text-left text-neutral-400">
-                      <Th>Date</Th>
-                      <Th className="w-full">Description</Th>
-                      <Th className="hidden sm:table-cell">Sport</Th>
-                      <Th className="text-right hidden sm:table-cell">Stake</Th>
-                      <Th className="text-right hidden sm:table-cell">Odds</Th>
-                      <Th>Status</Th>
-                      <Th className="text-right">Return</Th>
-                      <Th><span className="sr-only">Actions</span></Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {bets.map((b) => {
-                      const ret = effectiveReturn(b);
-                      const profit = ret == null ? null : +(ret - b.stake).toFixed(2);
-                      const isEditing = editingReturn.id === b.id;
-                      return (
-                        <tr key={b.id} className="border-t border-[#222]">
-                          <Td>{b.date}</Td>
-                          <Td className="max-w-[180px] sm:max-w-none truncate">{b.description}</Td>
-                          <Td className="hidden sm:table-cell">{b.sport}</Td>
-                          <Td className="text-right hidden sm:table-cell">{formatGBP(b.stake)}</Td>
-                          <Td className="text-right hidden sm:table-cell">{b.oddsDecimal.toFixed(2)}</Td>
-                          <Td>
-                            <StatusControl value={b.status} onChange={(v) => updateBet(b.id, { status: v })} />
-                          </Td>
-                          <Td className="text-right">
-                            {!isEditing ? (
-                              <div className="inline-flex items-center gap-1">
-                                {ret == null ? <span className="text-neutral-400">Pending</span> : <span>{formatGBP(ret)}</span>}
-                                <IconButton title="Edit return" onClick={() => openReturnEditor(b)}>
-                                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.03  0-1.42L18.34 3.25a1 1 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.87-1.79z"/></svg>
+            {/* Mobile cards */}
+            <div className="sm:hidden mt-3 space-y-3">
+              {groupedVisible.map(g => {
+                const open = ui.betGroupOpen[g.key] ?? true;
+                const r = groupRollup(g.items);
+                return (
+                  <div key={g.key} className="rounded-xl border border-[#222] bg-[#141414]">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <div>
+                        <div className="font-semibold">{g.key}</div>
+                        <div className="text-[11px] text-neutral-400">Staked {formatGBP(r.staked)}, Returns {formatGBP(r.returns)}, PL <span className={`${r.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatGBP(r.profit)}</span>, {r.hit}% hit</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {ui.betTab !== "Pending" ? (
+                          <IconButton title={ui.betTab === "Archived" ? "Unarchive day" : "Archive day"} onClick={() => archiveGroup(g.key, ui.betTab !== "Archived") }>
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 6H4v2h16V6zM5 9h14v10H5V9zm3 2v6h2v-6H8zm6 0v6h2v-6h-2z"/></svg>
+                          </IconButton>
+                        ) : null}
+                        <IconButton title={open ? "Collapse" : "Expand"} onClick={() => toggleDay(g.key)}>
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" className={`transition-transform ${open ? "rotate-180" : "rotate-0"}`}><path d="M7 10l5 5 5-5z"/></svg>
+                        </IconButton>
+                      </div>
+                    </div>
+                    {open ? (
+                      <div className="p-2 space-y-2">
+                        {g.items.map(b => {
+                          const ret = effectiveReturn(b);
+                          const profit = ret == null ? null : +(ret - b.stake).toFixed(2);
+                          const isEditing = editingReturn.id === b.id;
+                          return (
+                            <div key={b.id} className="rounded-lg border border-[#222] bg-black p-2">
+                              <div className="flex items-center justify-between">
+                                <div className="font-medium truncate pr-2">{b.description}</div>
+                                <StatusControl value={b.status} onChange={(v) => updateBet(b.id, { status: v })} />
+                              </div>
+                              <div className="mt-1 flex items-center justify-between text-xs">
+                                <div className="text-neutral-400">{b.sport} · Stake {formatGBP(b.stake)} · Odds {b.oddsDecimal.toFixed(2)}</div>
+                                <div className="flex items-center gap-2">
+                                  {!isEditing ? (
+                                    <>
+                                      {ret == null ? <span className="text-neutral-400">Pending</span> : <span className="font-semibold">{formatGBP(ret)}</span>}
+                                      <IconButton title="Edit return" onClick={() => openReturnEditor(b)}>
+                                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.03  0-1.42L18.34 3.25a1 1 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.87-1.79z"/></svg>
+                                      </IconButton>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <input className="w-20 text-right bg-black border border-[#333] rounded-lg px-2 py-1 outline-none" inputMode="decimal" placeholder="£0.00" value={editingReturn.value} onChange={(e) => setEditingReturn(v => ({ ...v, value: e.target.value }))} onKeyDown={(e) => { if (e.key === 'Enter') saveReturnEditor(); if (e.key === 'Escape') cancelReturnEditor(); }} />
+                                      <IconButton title="Save" onClick={saveReturnEditor}><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></IconButton>
+                                      <IconButton title="Cancel" onClick={cancelReturnEditor}><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></IconButton>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                              {ret != null ? <div className={`text-[11px] ${profit! >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{profit! >= 0 ? "+" : ""}{formatGBP(profit || 0)}</div> : null}
+                              <div className="mt-1 flex items-center justify-end gap-2">
+                                {b.status !== "Pending" ? (
+                                  <IconButton title={b.archived ? "Unarchive" : "Archive"} onClick={() => setArchived(b.id, !b.archived)}>
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 6H4v2h16V6zM5 9h14v10H5V9zm3 2v6h2v-6H8zm6 0v6h2v-6h-2z"/></svg>
+                                  </IconButton>
+                                ) : null}
+                                <IconButton title="Delete" onClick={() => removeBet(b.id)}>
+                                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 7h12v2H6zm2 3h8l-1 9H9L8 10zm3-5h2v2h-2z"/></svg>
                                 </IconButton>
                               </div>
-                            ) : (
-                              <div className="inline-flex items-center gap-1">
-                                <input
-                                  className="w-24 text-right bg-black border border-[#333] rounded-lg px-2 py-1 outline-none"
-                                  inputMode="decimal"
-                                  placeholder="£0.00"
-                                  value={editingReturn.value}
-                                  onChange={(e) => setEditingReturn(v => ({ ...v, value: e.target.value }))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') saveReturnEditor();
-                                    if (e.key === 'Escape') cancelReturnEditor();
-                                  }}
-                                />
-                                <IconButton title="Save" onClick={saveReturnEditor}>
-                                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-                                </IconButton>
-                                <IconButton title="Cancel" onClick={cancelReturnEditor}>
-                                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-                                </IconButton>
-                              </div>
-                            )}
-                            {ret != null ? (
-                              <div className={`text-[11px] ${profit! >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{profit! >= 0 ? "+" : ""}{formatGBP(profit || 0)}</div>
-                            ) : null}
-                          </Td>
-                          <Td className="text-right">
-                            <div className="flex items-center gap-2 justify-end">
-                              <IconButton title="Delete" onClick={() => removeBet(b.id)}>
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 7h12v2H6zm2 3h8l-1 9H9L8 10zm3-5h2v2h-2z"/></svg>
-                              </IconButton>
                             </div>
-                          </Td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+              {visibleItems.length < filteredSorted.length ? (
+                <div className="mt-3 flex justify-center"><Button onClick={() => setVisibleCount(c => c + 20)}>Load more</Button></div>
+              ) : null}
+            </div>
+
+            {/* Desktop table */}
+            {visibleItems.length === 0 ? (
+              <div className="hidden sm:block mt-3 text-sm text-neutral-400">No bets</div>
+            ) : (
+              <div className="hidden sm:block mt-4">
+                {groupedVisible.map(g => {
+                  const open = ui.betGroupOpen[g.key] ?? true;
+                  const r = groupRollup(g.items);
+                  return (
+                    <div key={g.key} className="mb-3 rounded-xl border border-[#222] bg-[#141414]">
+                      <div className="px-3 py-2 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <button className="p-1.5 rounded-lg bg-[#141414] border border-[#222] hover:bg-[#1f1f1f]" onClick={() => toggleDay(g.key)} aria-expanded={open} aria-label={open ? `Collapse ${g.key}` : `Expand ${g.key}`}>
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" className={`transition-transform ${open ? "rotate-180" : "rotate-0"}`}><path d="M7 10l5 5 5-5z"/></svg>
+                          </button>
+                          <div className="font-semibold">{g.key}</div>
+                          <div className="text-xs text-neutral-400">Staked {formatGBP(r.staked)}, Returns {formatGBP(r.returns)}, PL <span className={`${r.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatGBP(r.profit)}</span>, {r.hit}% hit</div>
+                        </div>
+                        {ui.betTab !== "Pending" ? (
+                          <IconButton title={ui.betTab === "Archived" ? "Unarchive day" : "Archive day"} onClick={() => archiveGroup(g.key, ui.betTab !== "Archived") }>
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 6H4v2h16V6zM5 9h14v10H5V9zm3 2v6h2v-6H8zm6 0v6h2v-6h-2z"/></svg>
+                          </IconButton>
+                        ) : null}
+                      </div>
+                      {open ? (
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full text-sm">
+                            <thead>
+                              <tr className="text-left text-neutral-400">
+                                <Th>Date</Th>
+                                <Th className="w-full">Description</Th>
+                                <Th>Sport</Th>
+                                <Th className="text-right">Stake</Th>
+                                <Th className="text-right">Odds</Th>
+                                <Th>Status</Th>
+                                <Th className="text-right">Return</Th>
+                                <Th><span className="sr-only">Actions</span></Th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {g.items.map(b => {
+                                const ret = effectiveReturn(b);
+                                const profit = ret == null ? null : +(ret - b.stake).toFixed(2);
+                                const isEditing = editingReturn.id === b.id;
+                                return (
+                                  <tr key={b.id} className="border-t border-[#222]">
+                                    <Td>{b.date}</Td>
+                                    <Td className="max-w-[260px] truncate">{b.description}</Td>
+                                    <Td>{b.sport}</Td>
+                                    <Td className="text-right">{formatGBP(b.stake)}</Td>
+                                    <Td className="text-right">{b.oddsDecimal.toFixed(2)}</Td>
+                                    <Td>
+                                      <StatusControl value={b.status} onChange={(v) => updateBet(b.id, { status: v })} />
+                                    </Td>
+                                    <Td className="text-right">
+                                      {!isEditing ? (
+                                        <div className="inline-flex items-center gap-1">
+                                          {ret == null ? <span className="text-neutral-400">Pending</span> : <span>{formatGBP(ret)}</span>}
+                                          <IconButton title="Edit return" onClick={() => openReturnEditor(b)}>
+                                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.03  0-1.42L18.34 3.25a1 1 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.87-1.79z"/></svg>
+                                          </IconButton>
+                                        </div>
+                                      ) : (
+                                        <div className="inline-flex items-center gap-1">
+                                          <input
+                                            className="w-24 text-right bg-black border border-[#333] rounded-lg px-2 py-1 outline-none"
+                                            inputMode="decimal"
+                                            placeholder="£0.00"
+                                            value={editingReturn.value}
+                                            onChange={(e) => setEditingReturn(v => ({ ...v, value: e.target.value }))}
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter') saveReturnEditor();
+                                              if (e.key === 'Escape') cancelReturnEditor();
+                                            }}
+                                          />
+                                          <IconButton title="Save" onClick={saveReturnEditor}>
+                                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                                          </IconButton>
+                                          <IconButton title="Cancel" onClick={cancelReturnEditor}>
+                                            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                                          </IconButton>
+                                        </div>
+                                      )}
+                                      {ret != null ? (
+                                        <div className={`text-[11px] ${profit! >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{profit! >= 0 ? "+" : ""}{formatGBP(profit || 0)}</div>
+                                      ) : null}
+                                    </Td>
+                                    <Td className="text-right">
+                                      <div className="flex items-center gap-2 justify-end">
+                                        {b.status !== "Pending" ? (
+                                          <IconButton title={b.archived ? "Unarchive" : "Archive"} onClick={() => setArchived(b.id, !b.archived)}>
+                                            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 6H4v2h16V6zM5 9h14v10H5V9zm3 2v6h2v-6H8zm6 0v6h2v-6h-2z"/></svg>
+                                          </IconButton>
+                                        ) : null}
+                                        <IconButton title="Delete" onClick={() => removeBet(b.id)}>
+                                          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 7h12v2H6zm2 3h8l-1 9H9L8 10zm3-5h2v2h-2z"/></svg>
+                                        </IconButton>
+                                      </div>
+                                    </Td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {visibleItems.length < filteredSorted.length ? (
+                  <div className="mt-3 flex justify-center"><Button onClick={() => setVisibleCount(c => c + 20)}>Load more</Button></div>
+                ) : null}
               </div>
             )}
-
-            {/* Add bet form */}
-            <div className="mt-6">
-              <h3 className="text-base sm:text-lg font-semibold">Add a bet</h3>
-              <div className="mt-3 sm:mt-4 grid grid-cols-2 sm:grid-cols-12 gap-3 sm:gap-4">
-                <LabeledInput className="sm:col-span-2" label="Date" type="date" value={form.date || todayYYYYMMDD()} onChange={(v) => setForm(f => ({ ...f, date: v }))} />
-                <LabeledInput className="sm:col-span-4 col-span-2" label="Description" placeholder="Villa v Palace, over 9 corners" value={form.description || ""} onChange={(v) => setForm(f => ({ ...f, description: v }))} />
-                <LabeledSelect className="sm:col-span-2 col-span-1" label="Sport" value={form.sport as string} onChange={(v) => setForm(f => ({ ...f, sport: v as Sport }))} options={["Football", "Cricket", "Tennis", "Other"]} />
-                <LabeledInput className="sm:col-span-1 col-span-1" label="Stake" prefix="£" type="number" step={0.01} value={form.stake ?? 0} onChange={(v) => setForm(f => ({ ...f, stake: cleanNumber(v) }))} />
-                <LabeledInput className="sm:col-span-1 col-span-1" label="Odds" type="number" step={0.01} value={form.oddsDecimal ?? 1} onChange={(v) => setForm(f => ({ ...f, oddsDecimal: cleanNumber(v) }))} />
-                <LabeledSelect className="sm:col-span-2 col-span-1" label="Status" value={form.status as string} onChange={(v) => setForm(f => ({ ...f, status: v as BetStatus }))} options={["Pending", "Won", "Lost"]} />
-                <LabeledInput className="sm:col-span-2 col-span-1" label="Return override" prefix="£" type="number" step={0.01} value={form.returnOverride ?? ""} onChange={(v) => setForm(f => ({ ...f, returnOverride: v === "" ? null : cleanNumber(v) }))} />
-                <div className="sm:col-span-12 col-span-2 flex justify-end">
-                  <Button onClick={addBet}>Add bet</Button>
-                </div>
-              </div>
-            </div>
           </Section>
         </section>
 
@@ -683,6 +930,12 @@ function IconButton({ children, onClick, title }: { children: React.ReactNode, o
     <button title={title} aria-label={title} onClick={onClick} className="p-1.5 sm:p-2 rounded-lg bg-[#141414] border border-[#222] hover:bg-[#1f1f1f] transition">
       {children}
     </button>
+  );
+}
+
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick} className={`px-3 py-1.5 rounded-full border text-xs sm:text-sm ${active ? "bg-white text-black border-white" : "bg-[#141414] border-[#222] text-neutral-300"}`}>{children}</button>
   );
 }
 
@@ -817,9 +1070,9 @@ function runSelfTests() {
     console.assert(/£\d/.test(formatGBP(12.34)), "GBP formatter should include pound sign");
 
     const sample: Bet[] = [
-      { id: "1", date: "2025-01-01", description: "A", sport: "Football", stake: 10, oddsDecimal: 2, status: "Won", createdAt: "", updatedAt: "" },
-      { id: "2", date: "2025-01-02", description: "B", sport: "Football", stake: 10, oddsDecimal: 3, status: "Lost", createdAt: "", updatedAt: "" },
-      { id: "3", date: "2025-01-03", description: "C", sport: "Tennis", stake: 5, oddsDecimal: 2, status: "Pending", createdAt: "", updatedAt: "" },
+      { id: "1", date: "2025-01-01", description: "A", sport: "Football", stake: 10, oddsDecimal: 2, status: "Won", createdAt: "", updatedAt: "", archived: false },
+      { id: "2", date: "2025-01-02", description: "B", sport: "Football", stake: 10, oddsDecimal: 3, status: "Lost", createdAt: "", updatedAt: "", archived: false },
+      { id: "3", date: "2025-01-03", description: "C", sport: "Tennis", stake: 5, oddsDecimal: 2, status: "Pending", createdAt: "", updatedAt: "", archived: false },
     ];
     const s = computeStats(sample, 100);
     console.assert(s.settledCount === 2, "Only settled bets should count");
@@ -829,42 +1082,13 @@ function runSelfTests() {
     console.assert(s.totalReturns === 20, "Returns should be 20 for one win at 2.0 and one loss");
     console.assert(typeof s.progress === "number" && s.progress >= 0 && s.progress <= 100, "Progress should clamp between 0 and 100");
 
-    const pays: Payment[] = [
-      { id: "p1", date: "2025-01-01", amount: 20, source: "Betting" },
-      { id: "p2", date: "2025-01-02", amount: 10, source: "Trading" },
-      { id: "p3", date: "2025-01-03", amount: 5, source: "Savings" },
-    ];
-    console.assert(sumPayments(pays) === 35, "sumPayments should sum all amounts");
-    console.assert(sumPayments(pays, "Betting") === 20, "sumPayments should filter by source");
-
-    // Cards math
-    const cards: DebtCard[] = [
-      { id: "c1", name: "Barclaycard", balance: 1000 },
-      { id: "c2", name: "Amex", balance: 500 },
-    ];
-    const paysToCards: Payment[] = [
-      { id: "q1", date: "2025-03-01", amount: 200, source: "Savings", cardId: "c1" },
-      { id: "q2", date: "2025-03-05", amount: 100, source: "Trading", cardId: "c2" },
-    ];
-    console.assert(totalDebt(cards, 0) === 1500, "totalDebt should sum card balances");
-    console.assert(sumPaymentsToCard(paysToCards, "c1") === 200, "sumPaymentsToCard should filter by card");
-    console.assert(remainingDebtFromCards(cards, paysToCards) === 1200, "remainingDebtFromCards should subtract payments per card");
-
-    // Roller formula quick check
-    const runStart = 5, runTarget = 100;
-    const startingBankroll = 5;
-    const profit0 = 0; // bankroll equals start
-    const current0 = startingBankroll + profit0;
-    const pct0 = Math.min(100, Math.max(0, Math.round(((current0 - runStart) / (runTarget - runStart)) * 100)));
-    console.assert(pct0 === 0, "Run progress should be 0 percent at start");
-    const profitEnd = 95; // bankroll equals 100
-    const currentEnd = startingBankroll + profitEnd;
-    const pctEnd = Math.min(100, Math.max(0, Math.round(((currentEnd - runStart) / (runTarget - runStart)) * 100)));
-    console.assert(pctEnd === 100, "Run progress should be 100 percent at target");
-
     // UI defaults
-    const uiDefaults: UIState = { overview: true, quickBank: false, cards: false, betting: false, recent: false, betLog: false };
+    const uiDefaults: UIState = { overview: true, quickBank: false, cards: false, betting: false, recent: false, betLog: false, betTab: "Pending", betVisibleCount: 20, betGroupOpen: {} };
     console.assert(uiDefaults.overview && !uiDefaults.quickBank && !uiDefaults.cards && !uiDefaults.betting && !uiDefaults.recent && !uiDefaults.betLog, "UI defaults should open only Overview");
+
+    // Grouping rollup
+    const rr = groupRollup(sample);
+    console.assert(rr.hit === 50 && rr.staked === 20 && rr.returns === 20 && rr.profit === 0, "Group rollup math should match");
 
     // Template fallback sanity check
     const name: string | undefined = undefined;
