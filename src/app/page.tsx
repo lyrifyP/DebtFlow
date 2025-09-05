@@ -479,7 +479,7 @@ export default function App() {
         <header className="pt-6 sm:pt-10 pb-4 sm:pb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight">DebtFlow</h1>
-            <p className="text-neutral-400 mt-1 text-sm sm:text-base">One place to clear track your balances</p>
+            <p className="text-neutral-400 mt-1 text-sm sm:text-base">One place to track your balances</p>
           </div>
           <Badge>{new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</Badge>
         </header>
